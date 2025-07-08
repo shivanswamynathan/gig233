@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import views,po_grn_views,itemwise_grn_views,attachment_api_views,invoice_recon_views,invoice_recon_logical_views
+from .views import views,po_grn_views,itemwise_grn_views,attachment_api_views,invoice_recon_logical_views
 
 app_name = 'document_processing'
 
@@ -17,8 +17,6 @@ urlpatterns = [
 
     # Process attachments from GRN table
     path('api/process-attachments-from-grn-table/', attachment_api_views.ProcessAttachmentsFromGrnTableAPI.as_view(), name='process_attachments_from_grn_table'),
-
-    path('api/llm-reconciliation/', invoice_recon_views.LLMReconciliationAPI.as_view(), name='llm_reconciliation'),
 
     path('api/reconciliation/', invoice_recon_logical_views.LLMReconciliationAPI.as_view(), name='reconciliation'),
 ]
