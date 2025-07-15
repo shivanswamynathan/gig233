@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import views,po_grn_views,itemwise_grn_views,attachment_api_views,invoice_recon_views,manually_enter_views, upload_key_views, invoice_views,check_views
+from .views import views,po_grn_views,itemwise_grn_views,attachment_api_views,invoice_recon_views,manually_enter_views, upload_key_views, invoice_views,check_views,match_views
 
 app_name = 'document_processing'
 
@@ -35,6 +35,12 @@ urlpatterns = [
 
     # OCR issues list API
     path('api/ocr-issues/', invoice_views.OCRIssuesListAPI.as_view(), name='ocr_issues'),
-
+    
+    #Check
     path('api/check-pending/', check_views.ApprovedReconciliationAPI.as_view(), name='check-pending'),
+    path('api/check-approval/', check_views.CheckApprovalAPI.as_view(), name='check-approval'),
+    path('api/check-approved/', check_views.CheckListAPI.as_view(), name='check-approved'),
+
+    # Match 
+    path('api/status-approval/', match_views.ReconciliationApprovalAPI.as_view(), name='status-approval'),
 ]
