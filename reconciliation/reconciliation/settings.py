@@ -57,15 +57,14 @@ DB_PORT = get_env_var('DB_PORT')
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': "reconciliation",
+        'NAME': DB_NAME,
         'USER': DB_USER,
         'PASSWORD': DB_PASSWORD,
         'HOST': DB_HOST,
-        'PORT': 5436,
+        'PORT': DB_PORT,
         'CONN_MAX_AGE': 600,
     }
 }
-
 # Optional: Database Pooling
 DATABASE_CONNECTION_POOLING = {
     'default': {
