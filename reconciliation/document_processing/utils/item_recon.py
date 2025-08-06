@@ -8,6 +8,8 @@ from django.db.models import Q
 from asgiref.sync import sync_to_async
 from difflib import SequenceMatcher
 import re
+import uuid
+from datetime import datetime
 
 from document_processing.models import (
     InvoiceData, 
@@ -277,11 +279,14 @@ class ItemWiseReconciliationProcessor:
         score = 0
         max_score = 100
         
+        mismatch_types = []
         # 1. HSN Code Match (25 points)
         hsn_match = (invoice_item.hsn_code and grn_item.hsn_no and 
                     invoice_item.hsn_code.strip().upper() == grn_item.hsn_no.strip().upper())
         if hsn_match:
             score += 25
+        else:
+            mismatch_types.append('hsn_mismatch')
         evaluation['match_details']['hsn_match'] = hsn_match
         
         # 2. Description Similarity (20 points)
@@ -293,11 +298,17 @@ class ItemWiseReconciliationProcessor:
         evaluation['match_details']['description_similarity'] = description_similarity
         evaluation['match_details']['description_match'] = description_similarity >= 0.7
         
+        if description_similarity < 0.5:
+            mismatch_types.append('description_mismatch')
+        
         # 3. Quantity Match (15 points)
         quantity_evaluation = self._evaluate_quantity_match(invoice_item, grn_item)
         score += quantity_evaluation['score']
         evaluation['match_details']['quantity_match'] = quantity_evaluation
         evaluation['variances']['quantity_variance'] = quantity_evaluation['variance']
+        
+        if not quantity_evaluation['within_tolerance']:
+            mismatch_types.append('quantity_mismatch')
         
         # 4. Unit Price Match (15 points)
         price_evaluation = self._evaluate_price_match(invoice_item, grn_item)
@@ -305,36 +316,34 @@ class ItemWiseReconciliationProcessor:
         evaluation['match_details']['price_match'] = price_evaluation
         evaluation['variances']['price_variance'] = price_evaluation['variance']
         
+        if not price_evaluation['within_tolerance']:
+            mismatch_types.append('price_mismatch')
+        
         # 5. Total Amount Match (15 points)
         amount_evaluation = self._evaluate_amount_match(invoice_item, grn_item)
         score += amount_evaluation['score']
         evaluation['match_details']['amount_match'] = amount_evaluation
         evaluation['variances']['amount_variance'] = amount_evaluation['variance']
         
+        if not amount_evaluation['within_tolerance']:
+            mismatch_types.append('amount_mismatch')
+        
         # 6. Unit of Measurement Match (10 points)
         unit_match = (invoice_item.unit_of_measurement and grn_item.unit and
-                     invoice_item.unit_of_measurement.strip().upper() == grn_item.unit.strip().upper())
+                    invoice_item.unit_of_measurement.strip().upper() == grn_item.unit.strip().upper())
         if unit_match:
             score += 10
+        else:
+            mismatch_types.append('unit_mismatch')
         evaluation['match_details']['unit_match'] = unit_match
         
         evaluation['match_score'] = score
         
-        # Determine match status
-        if score >= 85:
+        # Determine match status based on score and mismatches
+        if score >= 100 and len(mismatch_types) == 0:
             evaluation['match_status'] = 'perfect_match'
-        elif score >= 60:
-            evaluation['match_status'] = 'partial_match'
-        elif not quantity_evaluation['within_tolerance']:
-            evaluation['match_status'] = 'quantity_mismatch'
-        elif not price_evaluation['within_tolerance']:
-            evaluation['match_status'] = 'price_mismatch'
-        elif not hsn_match:
-            evaluation['match_status'] = 'hsn_mismatch'
-        elif description_similarity < 0.5:
-            evaluation['match_status'] = 'description_mismatch'
-        else:
-            evaluation['match_status'] = 'partial_match'
+        elif mismatch_types:
+            evaluation['match_status'] = ', '.join(sorted(mismatch_types))
         
         return evaluation
 
@@ -481,8 +490,6 @@ class ItemWiseReconciliationProcessor:
                 return 0.0
         
         # Generate a batch ID for this reconciliation run
-        import uuid
-        from datetime import datetime
         batch_id = f"ITEM_RECON_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
         
         # Map your field names correctly
