@@ -655,6 +655,27 @@ class InvoiceItemReconciliation(models.Model):
         auto_now=True,
         verbose_name="Updated At"
     )
+    # === NEW OVERALL MATCH STATUS FIELDS ===
+    overall_match_status = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        verbose_name="Overall Match Status",
+        db_index=True
+    )
+
+    match_notes = models.TextField(
+        null=True,
+        blank=True,
+        verbose_name="Match Notes"
+    )
+
+    updated_by = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        verbose_name="Updated By"
+    )
 
     class Meta:
         db_table = 'invoice_item_reconciliation'
@@ -675,6 +696,7 @@ class InvoiceItemReconciliation(models.Model):
             models.Index(fields=['reconciled_at']),
             models.Index(fields=['invoice_item_hsn']),
             models.Index(fields=['grn_item_hsn']),
+            models.Index(fields=['overall_match_status']),
         ]
 
         # Prevent duplicate reconciliations for same invoice item
