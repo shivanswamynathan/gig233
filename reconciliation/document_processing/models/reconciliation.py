@@ -164,7 +164,7 @@ class InvoiceItemReconciliation(models.Model):
 
     # === MATCHING DETAILS ===
     match_status = models.CharField(
-        max_length=50,
+        max_length=200,
         choices=[
             ('perfect_match', 'Perfect Match'),
             ('partial_match', 'Partial Match'),
@@ -606,6 +606,11 @@ class InvoiceItemReconciliation(models.Model):
         blank=True,
         verbose_name="Reconciliation Notes",
         help_text="Additional notes about this item reconciliation"
+    )
+    manual_match = models.BooleanField(
+        default=False,
+        verbose_name="Manual Match",
+        help_text="Whether this reconciliation was manually matched/swapped by user"
     )
 
     # === REFERENCE FIELDS FOR EASY QUERYING ===
@@ -1064,6 +1069,12 @@ class InvoiceGrnReconciliation(models.Model):
         verbose_name="Status",
         help_text="User approval status - True when user approves"
     )
+
+    invoice_approval = models.BooleanField(
+        default=False,
+        verbose_name="Invoice Approval"
+    )
+
 
     # === METADATA ===
     reconciled_at = models.DateTimeField(
