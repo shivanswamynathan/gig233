@@ -3,7 +3,7 @@ from datetime import datetime
 from django.views import View
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from document_processing.models import InvoiceGrnReconciliation,InvoiceItemReconciliation, InvoiceData
+from document_processing.models import InvoiceGrnReconciliation,InvoiceItemReconciliation, InvoiceData, GrnSummary
 from document_processing.utils.services.pagination import PaginationHelper, create_server_error_response
 import logging
 import json
@@ -22,6 +22,8 @@ class ReconciliationDetailAPI(View):
                 po_number = grn_summary.po_number
                 invoice_items = InvoiceItemReconciliation.objects.filter(invoice_number=invoice_number)
                 invoice_data = InvoiceData.objects.filter(invoice_number=invoice_number).first()
+                grn_aggregated_data = GrnSummary.objects.filter(grn_number=grn_summary.grn_number).first()
+
 
                 invoice_line_items = []
                 grn_line_items = []
@@ -58,12 +60,15 @@ class ReconciliationDetailAPI(View):
                     })
 
                     item_statuses.append({
-                        "item_sequence": item.invoice_item_sequence or idx,
+                        "id": item.id,
+                        "item_overall_status": item.overall_match_status,
                         "match_status": item.match_status,
                         "match_score": float(item.match_score) if item.match_score is not None else "-",
                         "quantity_variance": float(item.quantity_variance) if item.quantity_variance is not None else "-",
                         "subtotal_variance": float(item.subtotal_variance) if item.subtotal_variance is not None else "-",
                         "total_amount_variance": float(item.total_amount_variance) if item.total_amount_variance is not None else "-",
+                        "updated_by": item.updated_by if item.updated_by else None,
+                        "updtated_at": item.updated_at.timestamp() if item.updated_at else None,
                         "requires_review": item.requires_review,
                         "is_exception": item.is_exception
                     })
@@ -76,6 +81,7 @@ class ReconciliationDetailAPI(View):
                         "po_number": grn_summary.po_number if grn_summary.po_number else None,
                         "vendor": grn_summary.invoice_vendor if grn_summary.invoice_vendor else None,
                         "invoice_date": grn_summary.invoice_date if grn_summary.invoice_date else None,
+                        "invoice_discount": float(invoice_data.invoice_discount) if invoice_data.invoice_discount is not None else "-",
                         "invoice_total": float(grn_summary.invoice_total) if grn_summary.invoice_total is not None else "-",
                         "cgst": float(grn_summary.invoice_cgst) if grn_summary.invoice_cgst is not None else "-",
                         "sgst": float(grn_summary.invoice_sgst) if grn_summary.invoice_sgst is not None else "-",
@@ -88,6 +94,7 @@ class ReconciliationDetailAPI(View):
                         "po_number": po_number,
                         "vendor": grn_summary.grn_vendor if grn_summary.grn_vendor else None,
                         "grn_date": grn_summary.grn_date if grn_summary.grn_date else None,
+                        "grn_total_discount": float(grn_aggregated_data.total_discount) if grn_aggregated_data and grn_aggregated_data.total_discount is not None else "-",
                         "grn_total": float(grn_summary.grn_total) if grn_summary.grn_total is not None else "-",
                         "cgst": float(grn_summary.grn_cgst) if grn_summary.grn_cgst is not None else "-",
                         "sgst": float(grn_summary.grn_sgst) if grn_summary.grn_sgst is not None else "-",
