@@ -51,6 +51,7 @@ TABLE_SCHEMAS = [
             "approved_by": "Person who approved the reconciliation",
             "approved_at": "When the reconciliation was approved",
             "status": "User approval status - True when user approves",
+            "invoice_approval": "Invoice approval status (boolean)",
             "reconciled_at": "When the reconciliation was performed",
             "reconciled_by": "Person who performed the reconciliation",
             "updated_at": "Last update timestamp",
@@ -152,11 +153,15 @@ TABLE_SCHEMAS = [
             "is_exception": "Whether this item is flagged as an exception",
             "is_auto_matched": "Whether this was automatically matched",
             "reconciliation_notes": "Additional notes about this item reconciliation",
+            "match_notes": "Additional notes about the match",
             "po_number": "Purchase Order Number",
             "invoice_number": "Invoice Number",
             "grn_number": "GRN Number",
             "vendor_name": "Vendor Name",
+            "overall_match_status": "Overall match status for the item",
             "reconciled_at": "When the reconciliation was performed",
+            "updated_by": "Person who last updated the record",
+            "manual_match": "Whether this reconciliation was manually matched/swapped by user (boolean)",
             "updated_at": "Last update timestamp"
         },
         "sample_questions": [
