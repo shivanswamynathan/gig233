@@ -1,18 +1,16 @@
 import json
 import logging
 from datetime import datetime
-from django.http import JsonResponse
-from django.views import View
-from django.utils.decorators import method_decorator
-from django.views.decorators.csrf import csrf_exempt
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
 from django.db import transaction
 from document_processing.models import InvoiceItemReconciliation
 
 logger = logging.getLogger(__name__)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
-class ManualMatchAPI(View):
+class ManualMatchAPI(APIView):
     """
     POST endpoint to handle manual matching by COPYING values between Invoice and GRN
     in InvoiceItemReconciliation table
@@ -21,10 +19,10 @@ class ManualMatchAPI(View):
     
     Request Body:
     {
-        "invoice_data_id": integer (REQUIRED) - ID of InvoiceData record,
+        "id": integer (REQUIRED) - ID of InvoiceItemReconciliation record,
         "swap_direction": "invoice_to_grn" | "grn_to_invoice" (REQUIRED),
         "fields_to_swap": ["description", "quantity", "unit_price", "total_amount", "hsn", "all"] (OPTIONAL - defaults to ["all"]),
-        "user": "string (OPTIONAL)" - User who performed the manual match
+        "updated_by": "string (REQUIRED)" - User who performed the manual match
     }
     
     Functionality:
@@ -34,147 +32,120 @@ class ManualMatchAPI(View):
     - Updates match_status to "perfect_match" after successful copy operation
     """
     
-    def post(self, request):
+    def post(self, request, *args, **kwargs):
         """POST: Handle manual match by copying values"""
         try:
-            # Parse JSON request body
-            try:
-                body = json.loads(request.body.decode('utf-8'))
-            except json.JSONDecodeError:
-                return JsonResponse({
-                    'success': False,
-                    'error': 'Invalid JSON in request body'
-                }, status=400)
+            # Get data from DRF request
+            body = request.data
             
             # Extract required fields
-            invoice_data_id = body.get('invoice_data_id')
+            reconciliation_id = body.get('id')
             swap_direction = body.get('swap_direction')
             fields_to_swap = body.get('fields_to_swap', ['all'])
-            user = body.get('user', 'system')
+            updated_by = body.get('updated_by')
             
             # Validate required fields
-            if invoice_data_id is None or swap_direction is None:
-                return JsonResponse({
+            if reconciliation_id is None or swap_direction is None or updated_by is None:
+                return Response({
                     'success': False,
-                    'error': 'invoice_data_id and swap_direction are required'
-                }, status=400)
+                    'error': 'id, swap_direction, and updated_by are required'
+                }, status=status.HTTP_400_BAD_REQUEST)
             
             # Validate swap_direction
             if swap_direction not in ['invoice_to_grn', 'grn_to_invoice']:
-                return JsonResponse({
+                return Response({
                     'success': False,
                     'error': 'swap_direction must be "invoice_to_grn" or "grn_to_invoice"'
-                }, status=400)
+                }, status=status.HTTP_400_BAD_REQUEST)
             
             # Validate fields_to_swap
             allowed_fields = ['description', 'quantity', 'unit_price', 'total_amount', 'hsn', 'unit', 'subtotal', 'cgst', 'sgst', 'igst', 'all']
             if not isinstance(fields_to_swap, list) or not all(field in allowed_fields for field in fields_to_swap):
-                return JsonResponse({
+                return Response({
                     'success': False,
                     'error': f'fields_to_swap must be a list containing values from: {allowed_fields}'
-                }, status=400)
+                }, status=status.HTTP_400_BAD_REQUEST)
             
-            # Find reconciliation records by invoice_data_id
+            # Find reconciliation record by ID
             try:
-                reconciliation_records = InvoiceItemReconciliation.objects.filter(
-                    invoice_data_id=invoice_data_id
-                )
+                reconciliation = InvoiceItemReconciliation.objects.get(id=reconciliation_id)
                 
-                if not reconciliation_records.exists():
-                    return JsonResponse({
+                # Check if record already has perfect_match status
+                if reconciliation.match_status == 'perfect_match':
+                    return Response({
                         'success': False,
-                        'error': f'No reconciliation records found for invoice_data_id: {invoice_data_id}'
-                    }, status=404)
+                        'error': f'Cannot perform manual matching on reconciliation ID {reconciliation_id}: record already has perfect_match status',
+                        'current_status': reconciliation.match_status
+                    }, status=status.HTTP_400_BAD_REQUEST)
                 
-                # Check if any record has perfect_match status
-                perfect_match_records = reconciliation_records.filter(match_status='perfect_match')
-                if perfect_match_records.exists():
-                    return JsonResponse({
-                        'success': False,
-                        'error': f'Cannot perform manual matching on invoice_data_id {invoice_data_id}: {perfect_match_records.count()} record(s) already have perfect_match status',
-                        'perfect_match_items': list(perfect_match_records.values_list('invoice_item_sequence', flat=True))
-                    }, status=400)
-                
-            except Exception as e:
-                return JsonResponse({
+            except InvoiceItemReconciliation.DoesNotExist:
+                return Response({
                     'success': False,
-                    'error': f'Error finding reconciliation records: {str(e)}'
-                }, status=500)
+                    'error': f'No reconciliation record found with ID: {reconciliation_id}'
+                }, status=status.HTTP_404_NOT_FOUND)
+            except Exception as e:
+                return Response({
+                    'success': False,
+                    'error': f'Error finding reconciliation record: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
-            # Perform COPY operation for all reconciliation records
+            # Perform COPY operation
             with transaction.atomic():
-                processed_records = []
-                total_copied_fields = 0
+                copied_values = {}
                 
-                logger.info(f"[ManualMatchAPI] Starting COPY operation for invoice_data_id {invoice_data_id}")
-                logger.info(f"[ManualMatchAPI] Found {reconciliation_records.count()} reconciliation records")
+                logger.info(f"[ManualMatchAPI] Starting COPY operation for reconciliation ID {reconciliation_id}")
                 logger.info(f"[ManualMatchAPI] Copy direction: {swap_direction}")
                 logger.info(f"[ManualMatchAPI] Fields to copy: {fields_to_swap}")
                 
-                # Process each reconciliation record
-                for reconciliation in reconciliation_records:
-                    copied_values = {}
-                    
-                    # Define field mappings for copying
-                    field_mappings = self._get_field_mappings(fields_to_swap)
-                    
-                    # SIMPLE COPY LOGIC - NO SWAPPING
-                    if swap_direction == 'invoice_to_grn':
-                        # COPY Invoice data TO GRN fields (Invoice remains unchanged)
-                        for invoice_field, grn_field in field_mappings.items():
-                            invoice_value = getattr(reconciliation, invoice_field)
-                            
-                            # Copy invoice value to GRN field
-                            setattr(reconciliation, grn_field, invoice_value)
-                            copied_values[f"{invoice_field} → {grn_field}"] = f"Copied: {invoice_value}"
-                    
-                    elif swap_direction == 'grn_to_invoice':
-                        # COPY GRN data TO Invoice fields (GRN remains unchanged)
-                        for invoice_field, grn_field in field_mappings.items():
-                            grn_value = getattr(reconciliation, grn_field)
-                            
-                            # Copy GRN value to Invoice field
-                            setattr(reconciliation, invoice_field, grn_value)
-                            copied_values[f"{grn_field} → {invoice_field}"] = f"Copied: {grn_value}"
-                    
-                    # Update reconciliation status and flags
-                    original_match_status = reconciliation.match_status
-                    reconciliation.match_status = 'perfect_match'
-                    reconciliation.manual_match = True
-                    reconciliation.is_auto_matched = False
-                    reconciliation.reconciliation_notes = (
-                        f"{reconciliation.reconciliation_notes or ''}\n"
-                        f"Manual match performed by {user} on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. "
-                        f"Copy direction: {swap_direction}. "
-                        f"Original status: {original_match_status}. "
-                        f"Fields copied: {', '.join(fields_to_swap)}. "
-                        f"Status changed to perfect_match after manual copy."
-                    ).strip()
-                    
-                    # Recalculate variances after copying (should be zero since both sides are now identical)
-                    self._recalculate_variances(reconciliation)
-                    
-                    # Save the changes
-                    reconciliation.save()
-                    
-                    # Store processed record info
-                    processed_records.append({
-                        'reconciliation_id': reconciliation.id,
-                        'item_sequence': reconciliation.invoice_item_sequence,
-                        'original_status': original_match_status,
-                        'new_status': reconciliation.match_status,
-                        'copied_fields_count': len(field_mappings),
-                        'invoice_item_description': reconciliation.invoice_item_description,
-                        'grn_item_description': reconciliation.grn_item_description,
-                        'copied_values': copied_values
-                    })
-                    
-                    total_copied_fields += len(field_mappings)
+                # Define field mappings for copying
+                field_mappings = self._get_field_mappings(fields_to_swap)
+                
+                # SIMPLE COPY LOGIC - NO SWAPPING
+                if swap_direction == 'invoice_to_grn':
+                    # COPY Invoice data TO GRN fields (Invoice remains unchanged)
+                    for invoice_field, grn_field in field_mappings.items():
+                        invoice_value = getattr(reconciliation, invoice_field)
+                        
+                        # Copy invoice value to GRN field
+                        setattr(reconciliation, grn_field, invoice_value)
+                        copied_values[f"{invoice_field} → {grn_field}"] = f"Copied: {invoice_value}"
+                
+                elif swap_direction == 'grn_to_invoice':
+                    # COPY GRN data TO Invoice fields (GRN remains unchanged)
+                    for invoice_field, grn_field in field_mappings.items():
+                        grn_value = getattr(reconciliation, grn_field)
+                        
+                        # Copy GRN value to Invoice field
+                        setattr(reconciliation, invoice_field, grn_value)
+                        copied_values[f"{grn_field} → {invoice_field}"] = f"Copied: {grn_value}"
+                
+                # Update reconciliation status and flags
+                original_match_status = reconciliation.match_status
+                reconciliation.match_status = 'perfect_match'
+                reconciliation.overall_match_status = 'complete_match'
+                reconciliation.manual_match = True
+                reconciliation.is_auto_matched = False
+                reconciliation.updated_by = updated_by
+                
+                # Update match_notes instead of reconciliation_notes
+                reconciliation.match_notes = (
+                    f"{reconciliation.match_notes or ''}\n"
+                    f"Manual match performed by {updated_by} on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. "
+                    f"Copy direction: {swap_direction}. "
+                    f"Original status: {original_match_status}. "
+                    f"Fields copied: {', '.join(fields_to_swap)}. "
+                    f"Status changed to perfect_match after manual copy."
+                ).strip()
+                
+                # Recalculate variances after copying (should be zero since both sides are now identical)
+                self._recalculate_variances(reconciliation)
+                
+                # Save the changes
+                reconciliation.save()
                 
                 # Log the successful copy operation
-                logger.info(f"[ManualMatchAPI] Manual copy completed for invoice_data_id {invoice_data_id}")
-                logger.info(f"[ManualMatchAPI] Processed {len(processed_records)} records")
-                logger.info(f"[ManualMatchAPI] All records status changed to perfect_match")
+                logger.info(f"[ManualMatchAPI] Manual copy completed for reconciliation ID {reconciliation_id}")
+                logger.info(f"[ManualMatchAPI] Record status changed to perfect_match")
                 
                 # Determine operation description
                 if swap_direction == 'invoice_to_grn':
@@ -185,20 +156,29 @@ class ManualMatchAPI(View):
                 # Prepare detailed response
                 response_data = {
                     'success': True,
-                    'message': f'Manual copy completed successfully for {len(processed_records)} item(s). {operation_description}. All records now have perfect_match status.',
+                    'message': f'Manual copy completed successfully. {operation_description}. Record now has perfect_match status.',
                     'data': {
-                        'invoice_data_id': invoice_data_id,
-                        'records_processed': len(processed_records),
-                        'total_fields_copied': total_copied_fields,
-                        'new_match_status': 'perfect_match',
+                        'reconciliation_id': reconciliation_id,
+                        'fields_copied': len(field_mappings),
+                        'overall_match_status': 'overall_match_status',
+                        'match_status': 'perfect_match',
                         'copy_direction': swap_direction,
                         'operation_performed': operation_description,
-                        'fields_copied': fields_to_swap,
-                        'performed_by': user,
+                        'fields_copied_list': fields_to_swap,
+                        'performed_by': updated_by,
                         'performed_at': datetime.now().isoformat(),
-                        'processed_items': processed_records,
+                        'processed_item': {
+                            'reconciliation_id': reconciliation.id,
+                            'item_sequence': reconciliation.invoice_item_sequence,
+                            'original_status': original_match_status,
+                            'new_status': reconciliation.match_status,
+                            'copied_fields_count': len(field_mappings),
+                            'invoice_item_description': reconciliation.invoice_item_description,
+                            'grn_item_description': reconciliation.grn_item_description,
+                            'copied_values': copied_values
+                        },
                         'summary': {
-                            'all_items_now_perfect_match': True,
+                            'item_now_perfect_match': True,
                             'manual_match_flag_set': True,
                             'auto_matched_flag_cleared': True,
                             'operation_type': 'copy' 
@@ -206,15 +186,15 @@ class ManualMatchAPI(View):
                     }
                 }
                 
-                return JsonResponse(response_data, status=200)
+                return Response(response_data, status=status.HTTP_200_OK)
                 
         except Exception as e:
             logger.error(f"[ManualMatchAPI] Error: {str(e)}", exc_info=True)
-            return JsonResponse({
+            return Response({
                 'success': False,
                 'error': 'Internal server error occurred',
                 'details': str(e)
-            }, status=500)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     def _get_field_mappings(self, fields_to_swap):
         """
