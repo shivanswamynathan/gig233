@@ -249,6 +249,32 @@ class ItemWiseReconciliationProcessor:
         similarity = SequenceMatcher(None, clean_desc1, clean_desc2).ratio()
         
         return similarity
+    
+    def _check_tax_rate_match(self, invoice_item: InvoiceItemData, grn_item: 'ItemWiseGrn') -> bool:
+        """Check if tax rates match between invoice and GRN items"""
+        tolerance = 0.1  # 0.1% tolerance for tax rates
+        
+        try:
+            # Check CGST
+            if invoice_item.cgst_rate and grn_item.cgst_tax:
+                if abs(float(invoice_item.cgst_rate) - float(grn_item.cgst_tax)) > tolerance:
+                    return False
+            
+            # Check SGST
+            if invoice_item.sgst_rate and grn_item.sgst_tax:
+                if abs(float(invoice_item.sgst_rate) - float(grn_item.sgst_tax)) > tolerance:
+                    return False
+            
+            # Check IGST
+            if invoice_item.igst_rate and grn_item.igst_tax:
+                if abs(float(invoice_item.igst_rate) - float(grn_item.igst_tax)) > tolerance:
+                    return False
+            
+            return True
+            
+        except (ValueError, TypeError):
+            # If any tax rate conversion fails, assume no match
+            return False
 
     async def _evaluate_grn_item_matches(self, invoice_item: InvoiceItemData, grn_matches: List[ItemWiseGrn]) -> Dict[str, Any]:
         """Evaluate GRN item matches and return the best match with scoring"""
@@ -279,17 +305,20 @@ class ItemWiseReconciliationProcessor:
         score = 0
         max_score = 100
         
-        mismatch_types = []
         # 1. HSN Code Match (25 points)
         hsn_match = (invoice_item.hsn_code and grn_item.hsn_no and 
                     invoice_item.hsn_code.strip().upper() == grn_item.hsn_no.strip().upper())
         if hsn_match:
             score += 25
-        else:
-            mismatch_types.append('hsn_mismatch')
         evaluation['match_details']['hsn_match'] = hsn_match
         
-        # 2. Description Similarity (20 points)
+        # 2. Tax Rate Match (15 points)
+        tax_rate_match = self._check_tax_rate_match(invoice_item, grn_item)
+        if tax_rate_match:
+            score += 15
+        evaluation['match_details']['tax_rate_match'] = tax_rate_match
+        
+        # 3. Description Similarity (20 points)
         description_similarity = self._calculate_description_similarity(
             invoice_item.item_description, grn_item.item_name
         )
@@ -298,52 +327,59 @@ class ItemWiseReconciliationProcessor:
         evaluation['match_details']['description_similarity'] = description_similarity
         evaluation['match_details']['description_match'] = description_similarity >= 0.7
         
-        if description_similarity < 0.5:
-            mismatch_types.append('description_mismatch')
-        
-        # 3. Quantity Match (15 points)
+        # 4. Quantity Match (15 points)
         quantity_evaluation = self._evaluate_quantity_match(invoice_item, grn_item)
         score += quantity_evaluation['score']
         evaluation['match_details']['quantity_match'] = quantity_evaluation
         evaluation['variances']['quantity_variance'] = quantity_evaluation['variance']
         
-        if not quantity_evaluation['within_tolerance']:
-            mismatch_types.append('quantity_mismatch')
-        
-        # 4. Unit Price Match (15 points)
+        # 5. Unit Price Match (15 points)
         price_evaluation = self._evaluate_price_match(invoice_item, grn_item)
         score += price_evaluation['score']
         evaluation['match_details']['price_match'] = price_evaluation
         evaluation['variances']['price_variance'] = price_evaluation['variance']
         
-        if not price_evaluation['within_tolerance']:
-            mismatch_types.append('price_mismatch')
-        
-        # 5. Total Amount Match (15 points)
+        # 6. Total Amount Match (15 points) - This is our subtotal match
         amount_evaluation = self._evaluate_amount_match(invoice_item, grn_item)
         score += amount_evaluation['score']
-        evaluation['match_details']['amount_match'] = amount_evaluation
+        evaluation['match_details']['amount_match'] = amount_evaluation  # This represents subtotal match
         evaluation['variances']['amount_variance'] = amount_evaluation['variance']
         
-        if not amount_evaluation['within_tolerance']:
-            mismatch_types.append('amount_mismatch')
-        
-        # 6. Unit of Measurement Match (10 points)
+        # 7. Unit of Measurement Match (10 points)
         unit_match = (invoice_item.unit_of_measurement and grn_item.unit and
                     invoice_item.unit_of_measurement.strip().upper() == grn_item.unit.strip().upper())
         if unit_match:
             score += 10
-        else:
-            mismatch_types.append('unit_mismatch')
         evaluation['match_details']['unit_match'] = unit_match
         
         evaluation['match_score'] = score
         
-        # Determine match status based on score and mismatches
-        if score >= 100 and len(mismatch_types) == 0:
+        # === NEW: BUILD SPECIFIC MISMATCH LIST ===
+        mismatch_types = []
+        
+        # Core criteria mismatches (these cause overall_match_status = 'mismatch')
+        if not hsn_match:
+            mismatch_types.append('hsn_mismatch')
+        if not tax_rate_match:
+            mismatch_types.append('tax_rate_mismatch')
+        if not amount_evaluation['within_tolerance']:  # This is subtotal mismatch
+            mismatch_types.append('subtotal_mismatch')
+        
+        # Secondary criteria mismatches (these cause overall_match_status = 'conditional_match')
+        if not quantity_evaluation['within_tolerance']:
+            mismatch_types.append('quantity_mismatch')
+        if not price_evaluation['within_tolerance']:
+            mismatch_types.append('price_mismatch')
+        #if description_similarity < 0.5:
+         #   mismatch_types.append('description_mismatch')
+        #if not unit_match:
+         #   mismatch_types.append('unit_mismatch')
+        
+        # Set match_status based on specific issues
+        if len(mismatch_types) == 0:
             evaluation['match_status'] = 'perfect_match'
-        elif mismatch_types:
-            evaluation['match_status'] = ', '.join(sorted(mismatch_types))
+        else:
+            evaluation['match_status'] = ', '.join(mismatch_types)
         
         return evaluation
 
@@ -459,7 +495,7 @@ class ItemWiseReconciliationProcessor:
         }
 
     async def _create_item_reconciliation_record(self, invoice_item: InvoiceItemData, match_evaluation: Dict[str, Any]) -> 'InvoiceItemReconciliation':
-        """Create item reconciliation record from match evaluation - FIXED for your model"""
+        """Create item reconciliation record from match evaluation - UPDATED with overall match status"""
         
         grn_item = match_evaluation['grn_item']
         match_details = match_evaluation['match_details']
@@ -508,8 +544,7 @@ class ItemWiseReconciliationProcessor:
             'hsn_match_score': Decimal('1.0000') if match_details.get('hsn_match', False) else Decimal('0.0000'),
             'description_match_score': Decimal(str(match_details.get('description_similarity', 0))),
             'amount_match_score': Decimal(str(match_details.get('amount_match', {}).get('score', 0) / 15)),
-            'amount_match_score': Decimal(str(match_details.get('amount_match', {}).get('score', 0) / 15)),
-            'quantity_match_score': Decimal(str(match_details.get('quantity_match', {}).get('score', 0) / 15)),  
+            'quantity_match_score': Decimal(str(match_details.get('quantity_match', {}).get('score', 0) / 15)),
             
             # === INVOICE ITEM DATA (CACHED) ===
             'invoice_item_sequence': invoice_item.item_sequence,
@@ -585,9 +620,36 @@ class ItemWiseReconciliationProcessor:
             'vendor_name': invoice_item.vendor_name or ''
         }
         
+        # === NEW: OVERALL MATCH LOGIC ===
+        match_flags = {
+            'subtotal': match_details.get('amount_match', {}).get('within_tolerance', False),
+            'quantity': match_details.get('quantity_match', {}).get('within_tolerance', False),
+            'price': match_details.get('price_match', {}).get('within_tolerance', False),
+            'hsn': match_details.get('hsn_match', False),
+            'tax_rate': self._check_tax_rate_match(invoice_item, grn_item)
+        }
+
+        #description_mismatch = match_details.get('description_similarity', 1.0) < 0.5
+        #unit_mismatch = (
+        #    invoice_item.unit_of_measurement and grn_item.unit and
+        #    invoice_item.unit_of_measurement.strip().upper() != grn_item.unit.strip().upper()
+        #)
+
+        # Determine overall status
+        if all(match_flags.values()): #and not description_mismatch and not unit_mismatch:
+            overall_status = "complete_match"
+        elif match_flags['subtotal'] and match_flags['hsn'] and match_flags['tax_rate']:
+            overall_status = "conditional_match"
+        else:
+            overall_status = "mismatch"
+
+        # Add NEW fields to reconciliation_data
+        reconciliation_data['overall_match_status'] = overall_status
+        reconciliation_data['updated_by'] = 'system'
+        
         reconciliation = await sync_to_async(InvoiceItemReconciliation.objects.create)(**reconciliation_data)
         
-        logger.info(f"Created item reconciliation record {reconciliation.id} for invoice item {invoice_item.id} with score {match_evaluation['match_score']}")
+        logger.info(f"Created item reconciliation record {reconciliation.id} for invoice item {invoice_item.id} with score {match_evaluation['match_score']} and overall status: {overall_status}")
         return reconciliation
 
     async def _create_no_match_item_record(self, invoice_item: InvoiceItemData) -> Dict[str, Any]:
@@ -701,18 +763,24 @@ class ItemWiseReconciliationProcessor:
         """Update processing statistics for items"""
         if match_status == 'perfect_match':
             self.stats['perfect_matches'] += 1
-        elif match_status == 'partial_match':
-            self.stats['partial_matches'] += 1
-        elif match_status == 'quantity_mismatch':
-            self.stats['quantity_mismatches'] += 1
-        elif match_status == 'price_mismatch':
-            self.stats['price_mismatches'] += 1
-        elif match_status == 'hsn_mismatch':
+        elif 'hsn_mismatch' in match_status:
             self.stats['hsn_mismatches'] += 1
-        elif match_status == 'description_mismatch':
-            self.stats['description_mismatches'] += 1
-        elif match_status in ['no_match', 'no_grn_item_found']:  # FIXED: Handle both possible no-match statuses
+        elif 'tax_rate_mismatch' in match_status:
+            self.stats['tax_rate_mismatches'] += 1
+        elif 'subtotal_mismatch' in match_status:
+            self.stats['subtotal_mismatches'] += 1
+        elif 'quantity_mismatch' in match_status:
+            self.stats['quantity_mismatches'] += 1
+        elif 'price_mismatch' in match_status:
+            self.stats['price_mismatches'] += 1
+        #elif 'description_mismatch' in match_status:
+        #    self.stats['description_mismatches'] += 1
+        #elif 'unit_mismatch' in match_status:
+        #   self.stats['unit_mismatches'] += 1
+        elif match_status in ['no_match', 'no_grn_item_found']:
             self.stats['no_matches'] += 1
+        else:
+            self.stats['partial_matches'] += 1 
 
 
 # Main function to run item-wise reconciliation
