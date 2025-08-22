@@ -4,6 +4,7 @@ from django.utils.decorators import method_decorator
 from django.views import View
 import json
 import logging
+import asyncio
 from document_processing.utils.processors.invoice_processors.invoice_pdf_processor import InvoicePDFProcessor
 from document_processing.utils.processors.invoice_processors.invoice_image_processor import InvoiceImageProcessor
 
@@ -68,13 +69,13 @@ class ProcessInvoiceAPI(View):
             if is_pdf:
                 # Process PDF file
                 processor = InvoicePDFProcessor()
-                extracted_data = processor.process_uploaded_file(invoice_file)
+                extracted_data = asyncio.run(processor.process_uploaded_file(invoice_file))
                 processing_method = "PDF Text Extraction + LLM"
 
             elif is_image:
                 # Process image file
                 processor = InvoiceImageProcessor()
-                extracted_data = processor.process_uploaded_file(invoice_file)
+                extracted_data = asyncio.run(processor.process_uploaded_file(invoice_file))
                 processing_method = "OCR + LLM"
 
             # Add processing method to metadata
