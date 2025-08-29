@@ -82,6 +82,23 @@ class InvoiceData(models.Model):
         validators=[MinValueValidator(Decimal('0.00'))]
     )
 
+    invoice_discount = models.DecimalField(
+        max_digits=15, decimal_places=2, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="Invoice Discount"
+    )
+
+    # === STATUS FLAGS ===
+    matched = models.BooleanField(
+        default=False,
+        verbose_name="Matched"
+    )
+
+    duplicates = models.BooleanField(
+        default=False,
+        verbose_name="Duplicates"
+    )
+
     # === ITEMS (JSON) ===
     items_data = models.JSONField(blank=True, null=True)
 
