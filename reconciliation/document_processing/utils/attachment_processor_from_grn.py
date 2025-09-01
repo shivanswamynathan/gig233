@@ -367,7 +367,8 @@ class AttachmentProcessorFromGrn:
                     'cgst_amount': invoice_totals.get('total_cgst'),
                     'sgst_amount': invoice_totals.get('total_sgst'),
                     'igst_amount': invoice_totals.get('total_igst'),
-                    'total_gst_amount': invoice_totals.get('total_gst')
+                    'total_gst_amount': invoice_totals.get('total_gst'),
+                    'invoice_discount': invoice_totals.get('total_discount')
                 }
                 
                 for field, value in financial_fields.items():
