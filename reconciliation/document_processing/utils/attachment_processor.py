@@ -442,7 +442,8 @@ class SimplifiedAttachmentProcessor:
                     'cgst_amount': invoice_totals.get('total_cgst'),                         # total_cgst
                     'sgst_amount': invoice_totals.get('total_sgst'),                         # total_sgst  
                     'igst_amount': invoice_totals.get('total_igst'),                         # total_igst
-                    'total_gst_amount': invoice_totals.get('total_gst')                      # total_gst
+                    'total_gst_amount': invoice_totals.get('total_gst'),                     # total_gst
+                    'invoice_discount': invoice_totals.get('total_discount')
                 }
             else:
                 financial_fields = {}
