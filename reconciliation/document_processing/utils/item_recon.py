@@ -252,30 +252,15 @@ class ItemWiseReconciliationProcessor:
     
     def _check_tax_rate_match(self, invoice_item: InvoiceItemData, grn_item: 'ItemWiseGrn') -> bool:
         """Check if tax rates match between invoice and GRN items"""
-        tolerance = 0.1  # 0.1% tolerance for tax rates
-        
-        try:
-            # Check CGST
-            if invoice_item.cgst_rate and grn_item.cgst_tax:
-                if abs(float(invoice_item.cgst_rate) - float(grn_item.cgst_tax)) > tolerance:
-                    return False
-            
-            # Check SGST
-            if invoice_item.sgst_rate and grn_item.sgst_tax:
-                if abs(float(invoice_item.sgst_rate) - float(grn_item.sgst_tax)) > tolerance:
-                    return False
-            
-            # Check IGST
-            if invoice_item.igst_rate and grn_item.igst_tax:
-                if abs(float(invoice_item.igst_rate) - float(grn_item.igst_tax)) > tolerance:
-                    return False
-            
-            return True
-            
-        except (ValueError, TypeError):
-            # If any tax rate conversion fails, assume no match
-            return False
-
+        return (
+        (invoice_item.cgst_rate == grn_item.cgst_tax) and
+        (invoice_item.sgst_rate == grn_item.sgst_tax) and
+        (invoice_item.igst_rate == grn_item.igst_tax) and
+        (invoice_item.cgst_amount == grn_item.cgst_tax_amount) and
+        (invoice_item.sgst_amount == grn_item.sgst_tax_amount) and
+        (invoice_item.igst_amount == grn_item.igst_tax_amount) and
+        (invoice_item.total_tax_amount == grn_item.tax_amount)
+    )
     async def _evaluate_grn_item_matches(self, invoice_item: InvoiceItemData, grn_matches: List[ItemWiseGrn]) -> Dict[str, Any]:
         """Evaluate GRN item matches and return the best match with scoring"""
         
@@ -465,8 +450,8 @@ class ItemWiseReconciliationProcessor:
                 return Decimal('0.00')
             return Decimal(str(value))
         
-        invoice_total = safe_decimal(invoice_item.item_total_amount)
-        grn_total = safe_decimal(grn_item.total)
+        invoice_total = safe_decimal(invoice_item.invoice_value_item_wise)
+        grn_total = safe_decimal(grn_item.subtotal)
         
         variance = invoice_total - grn_total
         
