@@ -670,6 +670,13 @@ class InvoiceItemReconciliation(models.Model):
         verbose_name="Match Notes"
     )
 
+    comments = models.TextField(
+        null=True,
+        blank=True,
+        verbose_name="Comments",
+        help_text="Additional comments for this item reconciliation"
+    )
+
     updated_by = models.CharField(
         max_length=100,
         null=True,
