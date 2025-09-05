@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 import re
 import uuid
 from datetime import datetime
+from .services.unit_matcher import check_unit_match
 
 from document_processing.models import (
     InvoiceData, 
@@ -49,6 +50,7 @@ class ItemWiseReconciliationProcessor:
             'price_mismatches': 0,
             'hsn_mismatches': 0,
             'description_mismatches': 0,
+            'unit_mismatches': 0,
             'no_matches': 0,
             'errors': 0
         }
@@ -251,16 +253,35 @@ class ItemWiseReconciliationProcessor:
         return similarity
     
     def _check_tax_rate_match(self, invoice_item: InvoiceItemData, grn_item: 'ItemWiseGrn') -> bool:
-        """Check if tax rates match between invoice and GRN items"""
-        return (
-        (invoice_item.cgst_rate == grn_item.cgst_tax) and
-        (invoice_item.sgst_rate == grn_item.sgst_tax) and
-        (invoice_item.igst_rate == grn_item.igst_tax) and
-        (invoice_item.cgst_amount == grn_item.cgst_tax_amount) and
-        (invoice_item.sgst_amount == grn_item.sgst_tax_amount) and
-        (invoice_item.igst_amount == grn_item.igst_tax_amount) and
-        (invoice_item.total_tax_amount == grn_item.tax_amount)
-    )
+        """Check if tax rates match between invoice and GRN items with tolerance"""
+
+        def safe_decimal(value):
+            if value is None or value == '' or str(value).upper() == 'NULL':
+                return Decimal('0.00')
+            return Decimal(str(value))
+
+        tolerance = Decimal('0.05')  # 5 paise tolerance
+
+        # Compare tax rates (must be exact match)
+        rate_match = (
+            safe_decimal(invoice_item.cgst_rate) == safe_decimal(grn_item.cgst_tax) and
+            safe_decimal(invoice_item.sgst_rate) == safe_decimal(grn_item.sgst_tax) and
+            safe_decimal(invoice_item.igst_rate) == safe_decimal(grn_item.igst_tax)
+        )
+
+        # Compare tax amounts (within tolerance)
+        def within_tolerance(v1, v2):
+            return abs(safe_decimal(v1) - safe_decimal(v2)) <= tolerance
+
+        amount_match = (
+            within_tolerance(invoice_item.cgst_amount, grn_item.cgst_tax_amount) and
+            within_tolerance(invoice_item.sgst_amount, grn_item.sgst_tax_amount) and
+            within_tolerance(invoice_item.igst_amount, grn_item.igst_tax_amount) and
+            within_tolerance(invoice_item.total_tax_amount, grn_item.tax_amount)
+        )
+
+        return rate_match and amount_match
+
     async def _evaluate_grn_item_matches(self, invoice_item: InvoiceItemData, grn_matches: List[ItemWiseGrn]) -> Dict[str, Any]:
         """Evaluate GRN item matches and return the best match with scoring"""
         
@@ -331,8 +352,8 @@ class ItemWiseReconciliationProcessor:
         evaluation['variances']['amount_variance'] = amount_evaluation['variance']
         
         # 7. Unit of Measurement Match (10 points)
-        unit_match = (invoice_item.unit_of_measurement and grn_item.unit and
-                    invoice_item.unit_of_measurement.strip().upper() == grn_item.unit.strip().upper())
+        unit_match = check_unit_match(invoice_item.unit_of_measurement, grn_item.unit)
+
         if unit_match:
             score += 10
         evaluation['match_details']['unit_match'] = unit_match
@@ -357,8 +378,8 @@ class ItemWiseReconciliationProcessor:
             mismatch_types.append('price_mismatch')
         #if description_similarity < 0.5:
          #   mismatch_types.append('description_mismatch')
-        #if not unit_match:
-         #   mismatch_types.append('unit_mismatch')
+        if not unit_match:
+            mismatch_types.append('unit_mismatch')
         
         # Set match_status based on specific issues
         if len(mismatch_types) == 0:
@@ -760,8 +781,8 @@ class ItemWiseReconciliationProcessor:
             self.stats['price_mismatches'] += 1
         #elif 'description_mismatch' in match_status:
         #    self.stats['description_mismatches'] += 1
-        #elif 'unit_mismatch' in match_status:
-        #   self.stats['unit_mismatches'] += 1
+        elif 'unit_mismatch' in match_status:
+           self.stats['unit_mismatches'] += 1
         elif match_status in ['no_match', 'no_grn_item_found']:
             self.stats['no_matches'] += 1
         else:
