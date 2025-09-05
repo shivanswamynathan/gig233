@@ -24,6 +24,8 @@ class RuleBasedReconciliationAPI(View):
     1. Invoice-level reconciliation (InvoiceData vs GrnSummary)
     2. Item-level reconciliation (InvoiceItemData vs ItemWiseGrn)
     3. Updates GRN Summary status after completion
+    4. Only processes invoices with failure_reason=null and duplicates=false by default
+    5. Updates matched=true for successfully reconciled invoices
     
     Same API endpoint as before: /api/reconciliation/
     """
@@ -34,11 +36,13 @@ class RuleBasedReconciliationAPI(View):
         
         Request Body (JSON):
         {
-            "invoice_ids": [1, 2, 3] (optional - if not provided, processes all),
+            "invoice_ids": [1, 2, 3] (optional - if not provided, processes all valid invoices),
             "tolerance_percentage": 2.0 (optional - default: 2.0%),
             "date_tolerance_days": 30 (optional - default: 30 days),
             "batch_size": 100 (optional - default: 100),
-            "skip_item_reconciliation": false (optional - set true to skip item-level)
+            "skip_item_reconciliation": false (optional - set true to skip item-level),
+            "include_failed_invoices": false (optional - set true to include invoices with failure_reason),
+            "include_duplicate_invoices": false (optional - set true to include duplicate invoices)
         }
         """
         return asyncio.run(self._async_post(request))
@@ -53,6 +57,8 @@ class RuleBasedReconciliationAPI(View):
                 date_tolerance_days = int(body.get('date_tolerance_days', 30))
                 batch_size = int(body.get('batch_size', 100))
                 skip_item_reconciliation = body.get('skip_item_reconciliation', False)
+                include_failed_invoices = body.get('include_failed_invoices', False)
+                include_duplicate_invoices = body.get('include_duplicate_invoices', False)
             else:
                 # Form data support
                 invoice_ids_str = request.POST.get('invoice_ids', None)
@@ -64,6 +70,8 @@ class RuleBasedReconciliationAPI(View):
                 date_tolerance_days = int(request.POST.get('date_tolerance_days', 30))
                 batch_size = int(request.POST.get('batch_size', 100))
                 skip_item_reconciliation = request.POST.get('skip_item_reconciliation', 'false').lower() == 'true'
+                include_failed_invoices = request.POST.get('include_failed_invoices', 'false').lower() == 'true'
+                include_duplicate_invoices = request.POST.get('include_duplicate_invoices', 'false').lower() == 'true'
             
             # Validate parameters
             if tolerance_percentage < 0 or tolerance_percentage > 50:
@@ -84,25 +92,102 @@ class RuleBasedReconciliationAPI(View):
                     'error': 'batch_size must be between 5 and 500'
                 }, status=400)
             
-            # Get data counts for logging
-            total_invoices = await sync_to_async(InvoiceData.objects.filter(processing_status='completed').count)()
+            # Build invoice filter query
+            invoice_filter = Q(processing_status='completed')
+            
+            # Apply failure_reason and duplicates filters (default behavior)
+            if not include_failed_invoices:
+                invoice_filter &= Q(failure_reason__isnull=True)
+            
+            if not include_duplicate_invoices:
+                invoice_filter &= Q(duplicates=False)
+            
+            invoice_filter &= Q(matched=False)
+            
+            # Apply specific invoice_ids filter if provided
+            if invoice_ids:
+                invoice_filter &= Q(id__in=invoice_ids)
+            
+            # Get filtered invoice counts
+            total_invoices_all = await sync_to_async(InvoiceData.objects.filter(processing_status='completed').count)()
+            total_invoices_filtered = await sync_to_async(InvoiceData.objects.filter(invoice_filter).count)()
             total_grn_summaries = await sync_to_async(GrnSummary.objects.count)()
             
-            if invoice_ids:
-                invoices_to_process = len(invoice_ids)
-                total_invoice_items = await sync_to_async(
-                    lambda: InvoiceItemData.objects.filter(invoice_data_id__in=invoice_ids).count()
-                )()
-            else:
-                invoices_to_process = total_invoices
-                total_invoice_items = await sync_to_async(InvoiceItemData.objects.count)()
+            # Get filtered invoice IDs for processing
+            filtered_invoice_ids = await sync_to_async(list)(
+                InvoiceData.objects.filter(invoice_filter).values_list('id', flat=True)
+            )
             
+            if not filtered_invoice_ids:
+                # Get skipped invoice counts for detailed error message
+                skipped_failed = 0
+                skipped_duplicates = 0
+                if not include_failed_invoices:
+                    skipped_failed = await sync_to_async(
+                        InvoiceData.objects.filter(
+                            processing_status='completed',
+                            failure_reason__isnull=False
+                        ).count
+                    )()
+                
+                if not include_duplicate_invoices:
+                    skipped_duplicates = await sync_to_async(
+                        InvoiceData.objects.filter(
+                            processing_status='completed',
+                            duplicates=True
+                        ).count
+                    )()
+                
+                return JsonResponse({
+                    'success': False,
+                    'error': 'No invoices found matching the criteria',
+                    'details': {
+                        'total_invoices': total_invoices_all,
+                        'after_filters': total_invoices_filtered,
+                        'skipped_failed': skipped_failed,
+                        'skipped_duplicates': skipped_duplicates,
+                        'filters_applied': {
+                            'failure_reason_null': not include_failed_invoices,
+                            'duplicates_false': not include_duplicate_invoices,
+                            'specific_invoice_ids': invoice_ids is not None
+                        }
+                    }
+                }, status=400)
+            
+            # Get item counts for filtered invoices
+            total_invoice_items = await sync_to_async(
+                lambda: InvoiceItemData.objects.filter(invoice_data_id__in=filtered_invoice_ids).count()
+            )()
             total_grn_items = await sync_to_async(ItemWiseGrn.objects.count)()
             
-            logger.info(f"=== UNIFIED RECONCILIATION STARTED ===")
-            logger.info(f"Invoice-level: {total_invoices} invoices, {total_grn_summaries} GRN summaries")
-            logger.info(f"Item-level: {total_invoice_items} invoice items, {total_grn_items} GRN items")
-            logger.info(f"Processing: {invoices_to_process} invoices")
+            # Get skipped invoice counts for logging
+            skipped_failed = 0
+            skipped_duplicates = 0
+            if not include_failed_invoices:
+                skipped_failed = await sync_to_async(
+                    InvoiceData.objects.filter(
+                        processing_status='completed',
+                        failure_reason__isnull=False
+                    ).count
+                )()
+            
+            if not include_duplicate_invoices:
+                skipped_duplicates = await sync_to_async(
+                    InvoiceData.objects.filter(
+                        processing_status='completed',
+                        duplicates=True
+                    ).count
+                )()
+            
+            logger.info(f"=== UNIFIED RECONCILIATION STARTED (WITH FILTERS) ===")
+            logger.info(f"Invoice filtering:")
+            logger.info(f"  - Total invoices (completed): {total_invoices_all}")
+            logger.info(f"  - Skipped (failure_reason not null): {skipped_failed}")
+            logger.info(f"  - Skipped (duplicates=true): {skipped_duplicates}")
+            logger.info(f"  - Final invoices to process: {total_invoices_filtered}")
+            logger.info(f"Data counts:")
+            logger.info(f"  - Invoice-level: {total_invoices_filtered} invoices, {total_grn_summaries} GRN summaries")
+            logger.info(f"  - Item-level: {total_invoice_items} invoice items, {total_grn_items} GRN items")
             logger.info(f"Settings: tolerance={tolerance_percentage}%, date_tolerance={date_tolerance_days} days")
             logger.info(f"Skip item reconciliation: {skip_item_reconciliation}")
             
@@ -119,7 +204,7 @@ class RuleBasedReconciliationAPI(View):
             # =================================================================
             logger.info("STEP 1: Running invoice-level reconciliation...")
             invoice_result = await run_rule_based_reconciliation(
-                invoice_ids=invoice_ids,
+                invoice_ids=filtered_invoice_ids,
                 tolerance_percentage=tolerance_percentage,
                 date_tolerance_days=date_tolerance_days,
                 batch_size=batch_size
@@ -135,13 +220,24 @@ class RuleBasedReconciliationAPI(View):
             logger.info(f"Invoice-level completed: {invoice_result['total_processed']} invoices processed")
             
             # =================================================================
+            # STEP 1.1: UPDATE MATCHED STATUS FOR RECONCILED INVOICES
+            # =================================================================
+            logger.info("STEP 1.1: Updating matched status for reconciled invoices...")
+            matched_update_result = await self._update_matched_status_for_invoices(filtered_invoice_ids)
+            
+            if matched_update_result['success']:
+                logger.info(f"Matched status updated: {matched_update_result['invoices_marked_matched']} invoices marked as matched")
+            else:
+                logger.warning(f"Matched status update failed: {matched_update_result['error']}")
+            
+            # =================================================================
             # STEP 2: ITEM-LEVEL RECONCILIATION (unless skipped)
             # =================================================================
             item_result = None
             if not skip_item_reconciliation:
-                logger.info(" STEP 2: Running item-level reconciliation...")
+                logger.info("STEP 2: Running item-level reconciliation...")
                 item_result = await run_item_wise_reconciliation(
-                    invoice_ids=invoice_ids,
+                    invoice_ids=filtered_invoice_ids,
                     tolerance_percentage=tolerance_percentage
                 )
                 
@@ -155,8 +251,8 @@ class RuleBasedReconciliationAPI(View):
             # =================================================================
             # STEP 3: UPDATE GRN SUMMARY STATUS
             # =================================================================
-            logger.info(" STEP 3: Updating GRN Summary reconciliation status...")
-            grn_status_update_result = await self._update_grn_summary_status(invoice_ids)
+            logger.info("STEP 3: Updating GRN Summary reconciliation status...")
+            grn_status_update_result = await self._update_grn_summary_status(filtered_invoice_ids)
             
             if grn_status_update_result['success']:
                 logger.info(f"GRN status updated: {grn_status_update_result['total_grn_summaries_updated']} summaries")
@@ -170,21 +266,36 @@ class RuleBasedReconciliationAPI(View):
             
             response_data = {
                 'success': True,
-                'message': f"Unified reconciliation completed: {invoice_result['total_processed']} invoices processed",
+                'message': f"Unified reconciliation completed: {invoice_result['total_processed']} invoices processed (filtered)",
                 'status': 'completed',
                 'reconciliation_levels': {
                     'invoice_level': True,
                     'item_level': not skip_item_reconciliation,
-                    'grn_status_update': True
+                    'grn_status_update': True,
+                    'matched_status_update': True
+                },
+                'filtering': {
+                    'total_invoices_available': total_invoices_all,
+                    'invoices_after_filtering': total_invoices_filtered,
+                    'invoices_processed': invoice_result['total_processed'],
+                    'skipped_counts': {
+                        'failed_invoices': skipped_failed if not include_failed_invoices else 0,
+                        'duplicate_invoices': skipped_duplicates if not include_duplicate_invoices else 0
+                    },
+                    'filters_applied': {
+                        'failure_reason_null_only': not include_failed_invoices,
+                        'duplicates_false_only': not include_duplicate_invoices,
+                        'specific_invoice_ids': invoice_ids is not None
+                    }
                 },
                 'data': {
                     # INVOICE-LEVEL RESULTS
                     'invoice_reconciliation': {
                         'batch_id': invoice_result['batch_id'],
                         'total_processed': invoice_result['total_processed'],
-                        'invoices_available': total_invoices,
+                        'invoices_available': total_invoices_filtered,
                         'grn_summaries_available': total_grn_summaries,
-                        'success_rate': f"{invoice_result['total_processed']}/{invoices_to_process}",
+                        'success_rate': f"{invoice_result['total_processed']}/{total_invoices_filtered}",
                         'processing_method': 'Rule-Based Matching (No LLM)',
                         'statistics': {
                             'perfect_matches': invoice_result['stats'].get('perfect_matches', 0),
@@ -197,6 +308,9 @@ class RuleBasedReconciliationAPI(View):
                         }
                     },
                     
+                    # MATCHED STATUS UPDATE RESULTS
+                    'matched_status_update': matched_update_result,
+                    
                     # GRN STATUS UPDATE RESULTS
                     'grn_status_update': grn_status_update_result,
                     
@@ -206,6 +320,8 @@ class RuleBasedReconciliationAPI(View):
                         'date_tolerance_days': date_tolerance_days,
                         'batch_size': batch_size,
                         'skip_item_reconciliation': skip_item_reconciliation,
+                        'include_failed_invoices': include_failed_invoices,
+                        'include_duplicate_invoices': include_duplicate_invoices,
                         'uses_llm': False,
                         'data_sources': {
                             'invoice_level': 'InvoiceData + GrnSummary',
@@ -276,6 +392,50 @@ class RuleBasedReconciliationAPI(View):
                 'error': f'Unified reconciliation failed: {str(e)}'
             }, status=500)
     
+    async def _update_matched_status_for_invoices(self, invoice_ids: List[int]) -> Dict[str, Any]:
+        """
+        Update matched=True for invoices that have been successfully reconciled
+        """
+        try:
+            logger.info("Updating matched status for reconciled invoices...")
+            
+            # Get successfully reconciled invoice IDs
+            reconciled_invoice_ids = await sync_to_async(list)(
+                InvoiceGrnReconciliation.objects.filter(
+                    invoice_data_id__in=invoice_ids,
+                    match_status__in=['perfect_match', 'partial_match']
+                ).values_list('invoice_data_id', flat=True).distinct()
+            )
+            
+            if not reconciled_invoice_ids:
+                return {
+                    'success': True,
+                    'invoices_marked_matched': 0,
+                    'message': 'No reconciled invoices found to update'
+                }
+            
+            # Update matched=True for reconciled invoices
+            updated_count = await sync_to_async(
+                InvoiceData.objects.filter(
+                    id__in=reconciled_invoice_ids
+                ).update
+            )(matched=True)
+            
+            logger.info(f"Updated matched=True for {updated_count} invoices")
+            
+            return {
+                'success': True,
+                'invoices_marked_matched': updated_count,
+            }
+            
+        except Exception as e:
+            logger.error(f"Error updating matched status: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'invoices_marked_matched': 0
+            }
+    
     async def _update_grn_summary_status(self, invoice_ids: List[int] = None) -> Dict[str, Any]:
         """
         Update GRN Summary reconciliation status based on reconciliation results
@@ -312,7 +472,7 @@ class RuleBasedReconciliationAPI(View):
             partial_match_count = 0
             
             for grn_key, match_statuses in grn_status_map.items():
-                grn_number, po_number = grn_key.rsplit('_', 1)
+                grn_number, po_number = grn_key.rsplit('/', 1)
                 
                 # Determine overall status for this GRN
                 if all(status == 'perfect_match' for status in match_statuses):
@@ -349,7 +509,7 @@ class RuleBasedReconciliationAPI(View):
             
             return {
                 'success': True,
-                'total_grn_summaries_updated': updated_count,
+                'total_grn_summaries_updated': updated_count, #PO-MAA_OVN_CKS-CFI25-25710
                 'perfect_match_grns': perfect_match_count,
                 'partial_match_grns': partial_match_count,
                 'status_breakdown': {
