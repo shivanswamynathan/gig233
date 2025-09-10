@@ -721,6 +721,25 @@ class ItemWiseGrn(models.Model):
         help_text="Whether invoice data has been extracted from this GRN item"
     )
 
+    # === MISSING DATA FLAGS ===
+    missing_invoice = models.BooleanField(
+        default=False,
+        verbose_name="Missing Invoice",
+        help_text="True if invoice data is missing for this GRN item"
+    )
+
+    missing_po = models.BooleanField(
+        default=False,
+        verbose_name="Missing PO", 
+        help_text="True if PO data is missing for this GRN item"
+    )
+
+    missing_grn = models.BooleanField(
+        default=False,
+        verbose_name="Missing GRN",
+        help_text="True if GRN data is missing for this item"
+    )
+
     # Upload metadata
     upload_batch_id = models.CharField(
         max_length=100,
@@ -764,7 +783,7 @@ class ItemWiseGrn(models.Model):
 
         # Unique constraint to prevent duplicate entries within same batch
         unique_together = [
-            ['grn_no', 'po_no', 'sku_code', 'upload_batch_id']
+            ['grn_no', 'po_no', 'sku_code', 'item_name']
         ]
 
     def __str__(self):
@@ -984,6 +1003,12 @@ class GrnSummary(models.Model):
         validators=[MinValueValidator(Decimal('0.00'))],
         verbose_name="Total Amount",
         help_text="Sum of all total amounts including taxes"
+    )
+
+    total_discount = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="Total Discount"
     )
 
     # === METADATA ===
