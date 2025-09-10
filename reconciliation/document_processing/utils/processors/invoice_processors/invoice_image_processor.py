@@ -81,6 +81,7 @@ class InvoiceImageProcessor:
                     "unit": "",
                     "rate_per_unit": "",
                     "gross_amount": "",
+                    "discount_amount": "", 
                     "discount_amount": "",
                     "taxable_amount": "",
                     "gst_rate_percent": "",
@@ -90,6 +91,8 @@ class InvoiceImageProcessor:
                     "sgst_amount": "",
                     "igst_rate": "",
                     "igst_amount": "",
+                    "cess_rate": "",
+                    "cess_amount": "",
                     "total_gst_on_item": "",
                     "final_amount_including_gst": ""
                 }
@@ -116,6 +119,7 @@ class InvoiceImageProcessor:
                 "total_cgst": "",
                 "total_sgst": "",
                 "total_igst": "",
+                "total_cess": "",
                 "total_gst": "",
                 "final_invoice_amount": ""
             }
@@ -542,6 +546,9 @@ class InvoiceImageProcessor:
             11. Extract the Tax Summary section data into tax_summary_by_hsn array
             12. Be precise and accurate - cross-validate between all data sources
             13. Return ONLY the JSON object, no additional text
+            14. CESS fields should be extracted only if explicitly mentioned in the invoice
+            15. Transport charges may appear as  "Delivery Charges", "Transport", etc.
+            16. Discount amounts should be positive numbers even if shown with minus sign
 
             VENDOR DETAILS:
             - vendor_name: Extract company/business name from header
@@ -570,6 +577,8 @@ class InvoiceImageProcessor:
             - sgst_amount: SGST amount in rupees
             - igst_rate: IGST rate percentage
             - igst_amount: IGST amount in rupees
+            - cess_rate: CESS rate percentage 
+            - cess_amount: CESS amount in rupees
             - total_gst_on_item: Total GST for this item
             - final_amount_including_gst: Final amount including all taxes
             
@@ -592,6 +601,8 @@ class InvoiceImageProcessor:
             - total_sgst: Total SGST amount
             - total_igst: Total IGST amount
             - total_gst: Total GST amount
+            - total_cess: Total CESS amount 
+            - transport_charges: Transport/freight charges
             - final_invoice_amount: Final invoice amount
             
             Required JSON Schema:
@@ -796,7 +807,7 @@ class InvoiceImageProcessor:
             logger.info(f"Found {len(table_data)} table rows")
 
             # Enhanced extraction using all data sources
-            structured_data = self.extract_structured_data_with_gemini(
+            structured_data = await self.extract_structured_data_with_gemini(
                 plain_text, 
                 key_value_pairs, 
                 table_data, 
@@ -952,7 +963,7 @@ class InvoiceImageProcessor:
         try:
             # Create a blank image as placeholder
             blank_image = Image.new('RGB', (100, 100), color='white')
-            return self.extract_structured_data_with_gemini(
+            return await self.extract_structured_data_with_gemini(
                 ocr_text, 
                 {}, 
                 [], 
