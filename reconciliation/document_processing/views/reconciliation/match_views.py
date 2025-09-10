@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q, Count, Sum, Avg
-from document_processing.models import InvoiceGrnReconciliation,InvoiceItemReconciliation, InvoiceData, GrnSummary
+from document_processing.models import InvoiceGrnReconciliation,InvoiceItemReconciliation, InvoiceData, GrnSummary,InvoiceItemData
 from document_processing.utils.services.pagination import PaginationHelper, create_server_error_response
 import logging
 import json
@@ -93,7 +93,7 @@ class ReconciliationDetailAPI(APIView):
         }
 
     def get_summary_data(self, request):
-        """Returns summary dictionary"""
+        """Returns summary dictionary based on item-level analysis"""
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date')
         month = request.query_params.get('month')
@@ -107,67 +107,138 @@ class ReconciliationDetailAPI(APIView):
             last_day = calendar.monthrange(int(year), int(month))[1]
             end_date = f"{year}-{month.zfill(2)}-{last_day:02d}"
 
-        # Build item filters
-        item_filters = Q()
-        if start_date or end_date:
-            date_filters = Q()
-            if start_date:
-                date_filters &= Q(invoice_date__gte=start_date)
-            if end_date:
-                date_filters &= Q(invoice_date__lte=end_date)
-
-            invoice_ids_in_date_range = InvoiceGrnReconciliation.objects.filter(
-                date_filters
-            ).values_list('invoice_data_id', flat=True)
-            item_filters &= Q(invoice_data_id__in=invoice_ids_in_date_range)
-
+        # Build invoice-level filters
+        invoice_filters = Q()
+        if start_date:
+            invoice_filters &= Q(invoice_date__gte=start_date)
+        if end_date:
+            invoice_filters &= Q(invoice_date__lte=end_date)
         if po_number:
-            item_filters &= Q(po_number__icontains=po_number)
+            invoice_filters &= Q(po_number__icontains=po_number)
         if vendor:
-            item_filters &= Q(vendor_name__icontains=vendor)
+            invoice_filters &= Q(invoice_vendor__icontains=vendor)
 
-        # Get filtered items
-        items = InvoiceItemReconciliation.objects.filter(item_filters)
+        # Get filtered invoice reconciliations
+        invoices = InvoiceGrnReconciliation.objects.filter(invoice_filters)
+        
+        # Get all invoice data IDs from filtered invoices
+        invoice_data_ids = invoices.values_list('invoice_data_id', flat=True)
 
-        # Calculate metrics
-        total_items_invoice = items.count()
-        total_items_grn = items.exclude(grn_item_id__isnull=True).count()
-        matched_items = items.filter(match_status='perfect_match').count()
-        unmatched_items = items.exclude(match_status='perfect_match').count()
+        # Get item-level reconciliations for these invoices
+        items = InvoiceItemReconciliation.objects.filter(invoice_data_id__in=invoice_data_ids)
 
-        # Amount calculations
-        total_invoice_amount = items.aggregate(total=Sum('invoice_item_total_amount'))['total'] or 0
-        total_grn_amount = items.aggregate(total=Sum('grn_item_total_amount'))['total'] or 0
-        matched_invoice_amount = items.filter(match_status='perfect_match').aggregate(total=Sum('invoice_item_total_amount'))['total'] or 0
-        matched_grn_amount = items.filter(match_status='perfect_match').aggregate(total=Sum('grn_item_total_amount'))['total'] or 0
-        unmatched_invoice_amount = items.exclude(match_status='perfect_match').aggregate(total=Sum('invoice_item_total_amount'))['total'] or 0
-        unmatched_grn_amount = items.exclude(match_status='perfect_match').aggregate(total=Sum('grn_item_total_amount'))['total'] or 0
+        # Calculate invoice-level status based on item-level analysis
+        invoice_status_analysis = {}
+        for invoice_data_id in invoice_data_ids:
+            invoice_items = items.filter(invoice_data_id=invoice_data_id)
+            total_items = invoice_items.count()
+            perfect_match_items = invoice_items.filter(match_status='perfect_match').count()
+            
+            # Invoice is considered matched only if ALL items are perfectly matched
+            is_invoice_matched = (total_items > 0 and total_items == perfect_match_items)
+            invoice_status_analysis[invoice_data_id] = is_invoice_matched
+
+        # Get matched and unmatched invoice lists
+        matched_invoice_ids = [inv_id for inv_id, is_matched in invoice_status_analysis.items() if is_matched]
+        unmatched_invoice_ids = [inv_id for inv_id, is_matched in invoice_status_analysis.items() if not is_matched]
+
+        # Calculate basic metrics
+        total_invoices = invoices.count()
+        total_grns = invoices.exclude(grn_number__isnull=True).exclude(grn_number='').count()
+        matched_invoices = len(matched_invoice_ids)
+        unmatched_invoices = len(unmatched_invoice_ids)
+
+        # Amount calculations based on actual invoice matching status
+        if matched_invoice_ids:
+            matched_invoices_queryset = invoices.filter(invoice_data_id__in=matched_invoice_ids)
+            matched_invoice_amount = matched_invoices_queryset.aggregate(total=Sum('invoice_total'))['total'] or 0
+            matched_grn_amount = matched_invoices_queryset.aggregate(total=Sum('grn_total'))['total'] or 0
+        else:
+            matched_invoice_amount = 0
+            matched_grn_amount = 0
+
+        if unmatched_invoice_ids:
+            unmatched_invoices_queryset = invoices.filter(invoice_data_id__in=unmatched_invoice_ids)
+            unmatched_invoice_amount = unmatched_invoices_queryset.aggregate(total=Sum('invoice_total'))['total'] or 0
+            unmatched_grn_amount = unmatched_invoices_queryset.aggregate(total=Sum('grn_total'))['total'] or 0
+        else:
+            unmatched_invoice_amount = 0
+            unmatched_grn_amount = 0
+
+        # Conditional Match & Mismatch, complete match calculations
+        conditional_qs = invoices.filter(overall_match_status="conditional_match")
+        mismatch_qs = invoices.filter(overall_match_status="mismatch")
+        completed_qs = invoices.filter(overall_match_status="complete_match")
+
+        conditional_invoice_total = conditional_qs.aggregate(total=Sum('invoice_total'))['total'] or 0
+        conditional_grn_total = conditional_qs.aggregate(total=Sum('grn_total'))['total'] or 0
+
+        mismatch_invoice_total = mismatch_qs.aggregate(total=Sum('invoice_total'))['total'] or 0
+        mismatch_grn_total = mismatch_qs.aggregate(total=Sum('grn_total'))['total'] or 0
+    
+        complete_matched_invoice_total = completed_qs.aggregate(total=Sum('invoice_total'))['total'] or 0
+        complete_matched_grn_total = completed_qs.aggregate(total=Sum('grn_total'))['total'] or 0
+        
+        # Counts
+        conditional_count = conditional_qs.count()
+        mismatch_count = mismatch_qs.count()
+        complete_match_count = completed_qs.count()
+
+        # Total amounts
+        total_invoice_amount = invoices.aggregate(total=Sum('invoice_total'))['total'] or 0
+        total_grn_amount = invoices.aggregate(total=Sum('grn_total'))['total'] or 0
+
+        if total_invoices > 0:
+            matched_invoice_percentage = round((matched_invoices / total_invoices) * 100, 2)
+        else:
+            matched_invoice_percentage = 0.0
+
+        if total_grns > 0:
+            matched_grn_percentage = round((matched_invoices / total_grns) * 100, 2)
+        else:
+            matched_grn_percentage = 0.0
 
         return {
             "total_items_reconciled": {
-                "invoice": total_items_invoice,
-                "grn": total_items_grn
+                "invoice": total_invoices,
+                "grn": total_grns
             },
             "total_amount_reconciled": {
                 "invoice": float(total_invoice_amount),
                 "grn": float(total_grn_amount)
             },
             "matched_items": {
-                "invoice": matched_items,
-                "grn": matched_items
+                "invoice": matched_invoices,
+                "grn": matched_invoices
             },
             "matched_amount": {
                 "invoice": float(matched_invoice_amount),
                 "grn": float(matched_grn_amount)
             },
             "unmatched_items": {
-                "invoice": unmatched_items,
-                "grn": unmatched_items
+                "invoice": unmatched_invoices,
+                "grn": unmatched_invoices
             },
             "unmatched_amount": {
                 "invoice": float(unmatched_invoice_amount),
                 "grn": float(unmatched_grn_amount)
-            }
+            },
+            
+            "conditional_match_amount": {
+                "count": conditional_count,
+                "invoice": float(conditional_invoice_total),
+                "grn": float(conditional_grn_total)
+            },
+            "mismatch_amount": {
+                "count": mismatch_count,
+                "invoice": float(mismatch_invoice_total),
+                "grn": float(mismatch_grn_total)
+            },
+            "complete_match_amount": {
+                "count": complete_match_count,
+                "invoice": float(complete_matched_invoice_total),
+                "grn": float(complete_matched_grn_total)
+            },
         }
 
     def get_detailed_data(self, request):
@@ -213,6 +284,10 @@ class ReconciliationDetailAPI(APIView):
             item_statuses = []
 
             for idx, item in enumerate(invoice_items, start=1):
+                invoice_item_data = InvoiceItemData.objects.filter(
+                    invoice_data_id=grn_summary.invoice_data_id, 
+                    item_sequence=item.invoice_item_sequence or idx
+                ).first()
                 invoice_line_items.append({
                     "item_sequence": item.invoice_item_sequence or idx,
                     "item_name": item.invoice_item_description,
@@ -224,6 +299,8 @@ class ReconciliationDetailAPI(APIView):
                     "sgst": float(item.invoice_item_sgst_amount) if item.invoice_item_sgst_amount is not None else "-",
                     "cgst": float(item.invoice_item_cgst_amount) if item.invoice_item_cgst_amount is not None else "-",
                     "igst": float(item.invoice_item_igst_amount) if item.invoice_item_igst_amount is not None else "-",
+                    "cess": float(invoice_item_data.cess_amount) if invoice_item_data and invoice_item_data.cess_amount is not None else "-",
+                    "discount": float(invoice_item_data.discount_amount) if invoice_item_data and invoice_item_data.discount_amount is not None else "-",
                     "total": float(item.invoice_item_total_amount) if item.invoice_item_total_amount is not None else "-",
                     "status": item.match_status
                 })
@@ -253,7 +330,8 @@ class ReconciliationDetailAPI(APIView):
                     "updated_by": item.updated_by if item.updated_by else None,
                     "updated_at": item.updated_at.timestamp() if item.updated_at else None,
                     "requires_review": item.requires_review,
-                    "is_exception": item.is_exception
+                    "is_exception": item.is_exception,
+                    "comments": item.comments if item.comments else None
                 })
 
             all_reconciliations.append({
@@ -269,6 +347,8 @@ class ReconciliationDetailAPI(APIView):
                     "cgst": float(grn_summary.invoice_cgst) if grn_summary.invoice_cgst is not None else "-",
                     "sgst": float(grn_summary.invoice_sgst) if grn_summary.invoice_sgst is not None else "-",
                     "igst": float(grn_summary.invoice_igst) if grn_summary.invoice_igst is not None else "-",
+                    "cess": float(invoice_data.cess_amount) if invoice_data and invoice_data.cess_amount is not None else "-",
+                    "transportation": float(invoice_data.transport_charges) if invoice_data and invoice_data.transport_charges is not None else "-",
                     "subtotal": float(grn_summary.invoice_subtotal) if grn_summary.invoice_subtotal is not None else "-",
                     "line_items": invoice_line_items
                 },
@@ -286,7 +366,7 @@ class ReconciliationDetailAPI(APIView):
                     "line_items": grn_line_items
                 },
                 "status": {
-                    "match_status": grn_summary.match_status if grn_summary.match_status else "pending",
+                    "overall_match_status": grn_summary.overall_match_status if grn_summary.overall_match_status else "pending",
                     "match_score": float(grn_summary.match_score) if grn_summary.match_score else 0,
                     "vendor_match": grn_summary.vendor_match,
                     "gst_match": grn_summary.gst_match,
@@ -301,6 +381,7 @@ class ReconciliationDetailAPI(APIView):
                     "reconciled_at": grn_summary.reconciled_at if grn_summary.reconciled_at else None,
                     "status": grn_summary.status,
                     "item_level_status": item_statuses
+                    
                 }
             })
 
