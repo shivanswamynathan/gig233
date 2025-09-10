@@ -1,5 +1,5 @@
 from django.urls import path
-from ..views import attachment_api_views
+from ..views.reconciliation import attachment_api_views
 
 urlpatterns = [
     path(
