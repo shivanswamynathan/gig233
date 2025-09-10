@@ -473,7 +473,8 @@ class RuleBasedReconciliationProcessor:
             'matching_method': matching_method,
             'is_auto_matched': True,
             'tolerance_applied': self.tolerance_percentage,
-            'reconciliation_notes': f"Rule-based matching. Score: {match_evaluation['match_score']}/100. Method: {matching_method}."
+            'reconciliation_notes': f"Rule-based matching. Score: {match_evaluation['match_score']}/100. Method: {matching_method}.",
+            'overall_match_status': 'pending'
         }
         
         reconciliation = await sync_to_async(InvoiceGrnReconciliation.objects.create)(**reconciliation_data)
@@ -492,7 +493,8 @@ class RuleBasedReconciliationProcessor:
             'is_auto_matched': True,
             'matching_method': 'rule_based_matching',
             'tolerance_applied': self.tolerance_percentage,
-            'reconciliation_notes': 'No matching GRN summary records found using rule-based matching'
+            'reconciliation_notes': 'No matching GRN summary records found using rule-based matching',
+            'overall_match_status': 'pending'
         }
         
         reconciliation = await sync_to_async(InvoiceGrnReconciliation.objects.create)(**reconciliation_data)
