@@ -13,4 +13,6 @@ urlpatterns = [
          match_views.ReconciliationDetailAPI.as_view(), name='reconciliation_match_detail'),
     path("manual-match/",
          manual_match_views.ManualMatchAPI.as_view(), name="manual_match"),
+    path("mismatch-items/",
+         manual_match_views.ReconciliationMismatchAPI.as_view(), name="reconciliation_mismatch_items"),
 ]
