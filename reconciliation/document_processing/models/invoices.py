@@ -77,6 +77,20 @@ class InvoiceData(models.Model):
         max_digits=15, decimal_places=2, blank=True, null=True,
         validators=[MinValueValidator(Decimal('0.00'))]
     )
+    cess_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, blank=True, null=True,
+        verbose_name="CESS Rate"
+    )
+    cess_amount = models.DecimalField(
+        max_digits=15, decimal_places=2, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="CESS Amount"
+    )
+    transport_charges = models.DecimalField(
+        max_digits=15, decimal_places=2, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="Transport Charges"
+    )
     invoice_total_post_gst = models.DecimalField(
         max_digits=15, decimal_places=2, blank=True, null=True,
         validators=[MinValueValidator(Decimal('0.00'))]
@@ -275,6 +289,23 @@ class InvoiceItemData(models.Model):
         null=True,
         validators=[MinValueValidator(Decimal('0.00'))],
         verbose_name="IGST Amount"
+    )
+
+    cess_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, blank=True, null=True,
+        verbose_name="CESS Rate"
+    )
+    cess_amount = models.DecimalField(
+        max_digits=15, decimal_places=2, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="CESS Amount"
+    )
+
+    # === DISCOUNT FIELD ===
+    discount_amount = models.DecimalField(
+        max_digits=15, decimal_places=2, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00'))],
+        verbose_name="Discount Amount"
     )
 
     total_tax_amount = models.DecimalField(
