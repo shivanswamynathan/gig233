@@ -60,6 +60,7 @@ class InvoicePDFProcessor:
                     "unit": "",
                     "rate_per_unit": "",
                     "gross_amount": "",
+                    "discount_amount": "", 
                     "discount_amount": "",
                     "taxable_amount": "",
                     "gst_rate_percent": "",
@@ -69,6 +70,8 @@ class InvoicePDFProcessor:
                     "sgst_amount": "",
                     "igst_rate": "",
                     "igst_amount": "",
+                    "cess_rate": "",
+                    "cess_amount": "",
                     "total_gst_on_item": "",
                     "final_amount_including_gst": ""
                 }
@@ -96,6 +99,8 @@ class InvoicePDFProcessor:
                 "total_sgst": "",
                 "total_igst": "",
                 "total_gst": "",
+                "total_cess": "",
+                "transport_charges": "",
                 "final_invoice_amount": ""
             }
         }
@@ -186,6 +191,9 @@ EXTRACTION RULES:
 11.Extract the Tax Summary section data into tax_summary_by_hsn array
 12. Be precise and accurate - double-check all extracted values
 13. Return ONLY the JSON object, no additional text
+14. CESS fields should be extracted only if explicitly mentioned in the invoice
+15. Transport charges may appear as "Freight", "Delivery Charges", "Transport", etc.
+16. Discount amounts should be positive numbers even if shown with minus sign
 
 SPECIFIC EXTRACTION GUIDELINES:
 
@@ -216,6 +224,8 @@ For each product/service line:
 - sgst_amount: SGST amount in rupees
 - igst_rate: IGST rate percentage
 - igst_amount: IGST amount in rupees
+- cess_rate: CESS rate percentage 
+- cess_amount: CESS amount in rupees 
 - total_gst_on_item: Total GST for this item
 - final_amount_including_gst: Final amount including all taxes
 
@@ -238,6 +248,8 @@ INVOICE TOTALS:
 - total_sgst: Total SGST amount
 - total_igst: Total IGST amount
 - total_gst: Total GST amount
+- total_cess: Total CESS amount 
+- transport_charges: Transport/freight charges 
 - subtotal: Amount before round-off
 - round_off: Round-off amount
 - final_invoice_amount: Final invoice amount
