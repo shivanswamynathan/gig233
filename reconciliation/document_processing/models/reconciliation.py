@@ -1104,6 +1104,23 @@ class InvoiceGrnReconciliation(models.Model):
         verbose_name="Invoice Approval"
     )
 
+    OVERALL_MATCH_STATUS_CHOICES = [
+        ('complete_match', 'Complete Match'),
+        ('conditional_match', 'Conditional Match'),
+        ('mismatch', 'Mismatch'),
+        ('pending', 'Pending Analysis'),
+    ]
+
+    overall_match_status = models.CharField(
+        max_length=20,
+        choices=OVERALL_MATCH_STATUS_CHOICES,
+        default='pending',
+        null=True,  
+        blank=True,
+        verbose_name="Overall Match Status",
+        help_text="Overall reconciliation status based on invoice and item level matching"
+    )
+
 
     # === METADATA ===
     reconciled_at = models.DateTimeField(
