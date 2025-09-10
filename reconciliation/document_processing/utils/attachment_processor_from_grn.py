@@ -368,7 +368,9 @@ class AttachmentProcessorFromGrn:
                     'sgst_amount': invoice_totals.get('total_sgst'),
                     'igst_amount': invoice_totals.get('total_igst'),
                     'total_gst_amount': invoice_totals.get('total_gst'),
-                    'invoice_discount': invoice_totals.get('total_discount')
+                    'invoice_discount': invoice_totals.get('total_discount'),
+                    'cess_amount': invoice_totals.get('total_cess'),
+                    'transport_charges': invoice_totals.get('transport_charges')
                 }
                 
                 for field, value in financial_fields.items():
@@ -403,8 +405,9 @@ class AttachmentProcessorFromGrn:
             return invoice_data
 
     def _create_invoice_items(self, invoice_data: InvoiceData, line_items: List[Dict[str, Any]], attachment_info: Dict[str, Any]):
-        """Create invoice item records"""
-        # Implementation same as in SimplifiedAttachmentProcessor
+        """
+        Create invoice item records with proper fallback for invoice_value_item_wise
+        """
         try:
             items_to_create = []
             
@@ -423,7 +426,7 @@ class AttachmentProcessorFromGrn:
                     vendor_name=invoice_data.vendor_name
                 )
                 
-                # Parse numeric fields
+                # Parse numeric fields with special handling for invoice_value_item_wise
                 numeric_fields = {
                     'quantity': 'quantity',
                     'unit_price': 'rate_per_unit',
@@ -435,12 +438,29 @@ class AttachmentProcessorFromGrn:
                     'igst_rate': 'igst_rate',
                     'igst_amount': 'igst_amount',
                     'total_tax_amount': 'total_gst_on_item',
-                    'item_total_amount': 'final_amount_including_gst'
+                    'item_total_amount': 'final_amount_including_gst',
+                    'cess_rate': 'cess_rate',
+                    'cess_amount': 'cess_amount',
+                    'discount_amount': 'discount_amount'
                 }
                 
                 for field, source_field in numeric_fields.items():
                     value = item.get(source_field)
-                    if value:
+                    
+                    # Special handling for invoice_value_item_wise only
+                    if field == 'invoice_value_item_wise' and (not value or str(value).strip() in ['', '0']):
+                        # Try fallback to gross_amount
+                        value = item.get('gross_amount')
+                        if value and str(value).strip() not in ['', '0']:
+                            logger.info(f"Item {idx}: Using gross_amount fallback for invoice_value_item_wise: {value}")
+                        else:
+                            # Try calculating from quantity × rate
+                            if hasattr(item_record, 'quantity') and hasattr(item_record, 'unit_price') and item_record.quantity and item_record.unit_price:
+                                calculated_value = item_record.quantity * item_record.unit_price
+                                value = str(calculated_value)
+                                logger.info(f"Item {idx}: Calculated invoice_value_item_wise from qty×rate: {value}")
+                    
+                    if value and str(value).strip() not in ['', '0']:
                         try:
                             clean_value = str(value).replace(',', '').replace('\u20b9', '').replace('%', '').strip()
                             if clean_value:
@@ -454,9 +474,10 @@ class AttachmentProcessorFromGrn:
             if items_to_create:
                 InvoiceItemData.objects.bulk_create(items_to_create)
                 logger.info(f"Created {len(items_to_create)} item records for invoice {invoice_data.invoice_number}")
-        
+            
         except Exception as e:
             logger.error(f"Error creating invoice items: {str(e)}")
+            raise
 
     def _save_error_record_direct(self, attachment_info: Dict[str, Any], error_message: str, file_type: str, original_extension: str):
         """Save error record to database (sync version)"""
