@@ -460,107 +460,137 @@ class ItemWiseGrnDataProcessor:
             df = df.rename(columns=column_mapping)
             
             logger.info(f"Column mapping: {column_mapping}")
+            logger.info(f"Starting to process {len(df)} records")
             
-            # Process records
+            # Convert DataFrame to records for faster iteration
+            records_dict = df.to_dict('records')
+            
+            # Process records in chunks to avoid memory issues
+            chunk_size = 2000
             records_to_create = []
+            total_created = 0
             
-            with transaction.atomic():
-                for idx, row in df.iterrows():
-                    self.processed_records += 1
-                    try:
-                        # Convert row to dictionary
-                        record_data = {key: self.clean_value(row.get(key)) for key in df.columns}
+            for idx, row_dict in enumerate(records_dict):
+                self.processed_records += 1
+                
+                try:
+                    # Clean the record data
+                    record_data = {key: self.clean_value(value) for key, value in row_dict.items()}
+                    
+                    # Check if row is empty
+                    if self.is_empty_row(record_data):
+                        logger.debug(f"Skipping empty row {idx + 1}")
+                        continue
+                    
+                    # Parse and clean data
+                    processed_record = self._parse_record(record_data, idx + 1)
+                    
+                    # Validate record
+                    is_valid, validation_errors = self.validate_record(processed_record, idx + 1)
+                    
+                    if is_valid:
+                        # Add metadata
+                        processed_record['upload_batch_id'] = self.batch_id
+                        processed_record['uploaded_filename'] = filename
                         
-                        # Check if row is empty
-                        if self.is_empty_row(record_data):
-                            logger.info(f"Skipping empty row {idx + 1}")
-                            continue
+                        # Create model instance
+                        grn_record = ItemWiseGrn(**processed_record)
+                        records_to_create.append(grn_record)
                         
-                        # Parse and clean data
-                        processed_record = self._parse_record(record_data, idx + 1)
-                        
-                        # Check for duplicates
-                        if ItemWiseGrn.objects.filter(
-                           grn_no=processed_record.get('grn_no'),
-                           po_no=processed_record.get('po_no'),
-                           sku_code=processed_record.get('sku_code'),
-                           item_name=processed_record.get('item_name')
-                        ).exists():
-                           logger.info(f"Skipping DB duplicate row {idx + 1}")
-                           continue
-                        
-                        # Validate record
-                        is_valid, validation_errors = self.validate_record(processed_record, idx + 1)
-                        
-                        if is_valid:
-                            # Add metadata
-                            processed_record['upload_batch_id'] = self.batch_id
-                            processed_record['uploaded_filename'] = filename
+                        # Process chunk when it reaches chunk_size
+                        if len(records_to_create) >= chunk_size:
+                            # Get count before bulk create
+                            initial_count = ItemWiseGrn.objects.filter(upload_batch_id=self.batch_id).count()
                             
-                            # Create model instance
-                            grn_record = ItemWiseGrn(**processed_record)
-                            records_to_create.append(grn_record)
-                            #processed_records_data.append(processed_record)
-                            self.successful_records += 1
-                        else:
-                            self.errors.extend(validation_errors)
-                            self.failed_records += 1
-                        
-                    except Exception as e:
-                        error_msg = f"Row {idx + 1}: Error processing record - {str(e)}"
-                        logger.error(error_msg)
-                        self.errors.append(error_msg)
+                            # Bulk create with ignore_conflicts
+                            ItemWiseGrn.objects.bulk_create(
+                                records_to_create, 
+                                batch_size=1000,
+                                ignore_conflicts=True
+                            )
+                            
+                            # Calculate actually created records
+                            final_count = ItemWiseGrn.objects.filter(upload_batch_id=self.batch_id).count()
+                            created_count = final_count - initial_count
+                            total_created += created_count
+                            
+                            records_to_create = []  # Reset for next chunk
+                            logger.info(f"Processed chunk: {created_count} records created, total so far: {total_created}")
+                    else:
+                        self.errors.extend(validation_errors)
                         self.failed_records += 1
+                    
+                except Exception as e:
+                    error_msg = f"Row {idx + 1}: Error processing record - {str(e)}"
+                    logger.error(error_msg)
+                    self.errors.append(error_msg)
+                    self.failed_records += 1
+            
+            # Process remaining records
+            if records_to_create:
+                # Get count before bulk create
+                initial_count = ItemWiseGrn.objects.filter(upload_batch_id=self.batch_id).count()
                 
-                # Bulk create records
-                if records_to_create:
-                    ItemWiseGrn.objects.bulk_create(records_to_create, batch_size=100)
-                    logger.info(f"Successfully created {len(records_to_create)} records")
+                # Bulk create with ignore_conflicts
+                ItemWiseGrn.objects.bulk_create(
+                    records_to_create, 
+                    batch_size=1000,
+                    ignore_conflicts=True
+                )
+                
+                # Calculate actually created records
+                final_count = ItemWiseGrn.objects.filter(upload_batch_id=self.batch_id).count()
+                created_count = final_count - initial_count
+                total_created += created_count
+                logger.info(f"Processed final chunk: {created_count} records created")
+            
+            # Update successful records count
+            self.successful_records = total_created
+            
+            logger.info(f"Bulk creation completed. Total records created: {total_created}")
+            
+            # Run aggregation if records were created
+            if total_created > 0:
+                try:
+                    logger.info(f"Auto-aggregating GRN summaries for batch {self.batch_id}")
+                    aggregation_result = aggregate_grn_data(batch_id=self.batch_id)
 
-                    try:
-
-                        logger.info(f"Auto-aggregating GRN summaries for batch {self.batch_id}")
-                        aggregation_result = aggregate_grn_data(batch_id=self.batch_id)
-
-                        if aggregation_result['success']:
-
-                            logger.info(f"GRN aggregation completed: {aggregation_result['created_count']} summaries created, {aggregation_result['updated_count']} updated")
-
-                            self.aggregation_summary = {
-                                'grn_summaries_created': aggregation_result['created_count'],
-                                'grn_summaries_updated': aggregation_result['updated_count'],
-                                'total_grns_processed': aggregation_result['total_processed']
-                            }
-                        else:
-                            logger.warning(f"GRN aggregation failed: {aggregation_result['error']}")
-                            self.aggregation_summary = {
-                                'error': aggregation_result['error'],
-                                'status': 'failed'
-                            }
-                    except Exception as e:
-                        logger.warning(f"GRN aggregation error (non-critical): {str(e)}")
+                    if aggregation_result['success']:
+                        logger.info(f"GRN aggregation completed: {aggregation_result['created_count']} summaries created, {aggregation_result['updated_count']} updated")
                         self.aggregation_summary = {
-                            'error': str(e),
-                            'status': 'error'
+                            'grn_summaries_created': aggregation_result['created_count'],
+                            'grn_summaries_updated': aggregation_result['updated_count'],
+                            'total_grns_processed': aggregation_result['total_processed']
                         }
-
-                
-                # Update upload history
-                self.upload_history.successful_records = self.successful_records
-                self.upload_history.failed_records = self.failed_records
-                self.upload_history.completed_at = datetime.now()
-                
-                if self.failed_records == 0:
-                    self.upload_history.processing_status = 'completed'
-                elif self.successful_records == 0:
-                    self.upload_history.processing_status = 'failed'
-                else:
-                    self.upload_history.processing_status = 'partial'
-                
-                if self.errors:
-                    self.upload_history.error_details = '\n'.join(self.errors[:10])  # Store first 10 errors
-                
-                self.upload_history.save()
+                    else:
+                        logger.warning(f"GRN aggregation failed: {aggregation_result['error']}")
+                        self.aggregation_summary = {
+                            'error': aggregation_result['error'],
+                            'status': 'failed'
+                        }
+                except Exception as e:
+                    logger.warning(f"GRN aggregation error (non-critical): {str(e)}")
+                    self.aggregation_summary = {
+                        'error': str(e),
+                        'status': 'error'
+                    }
+            
+            # Update upload history
+            self.upload_history.successful_records = self.successful_records
+            self.upload_history.failed_records = self.failed_records
+            self.upload_history.completed_at = datetime.now()
+            
+            if self.failed_records == 0:
+                self.upload_history.processing_status = 'completed'
+            elif self.successful_records == 0:
+                self.upload_history.processing_status = 'failed'
+            else:
+                self.upload_history.processing_status = 'partial'
+            
+            if self.errors:
+                self.upload_history.error_details = '\n'.join(self.errors[:10])  # Store first 10 errors
+            
+            self.upload_history.save()
             
             # Return processing results
             result = {
@@ -572,12 +602,13 @@ class ItemWiseGrnDataProcessor:
                 'processing_status': self.upload_history.processing_status,
                 'success_rate': self.upload_history.success_rate
             }
+            
             if hasattr(self, 'aggregation_summary'):
                 result['grn_aggregation'] = self.aggregation_summary
             
+            logger.info(f"Processing completed: {self.successful_records} successful, {self.failed_records} failed")
             return result
-        
-            
+
         except Exception as e:
             logger.error(f"Error processing dataframe: {str(e)}")
             if self.upload_history:
